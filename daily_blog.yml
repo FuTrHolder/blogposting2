@@ -1,0 +1,62 @@
+name: 📝 블로그 원고 자동 생성 및 발송 (완전 무료)
+
+on:
+  # ── 매일 오전 7시 (KST) = UTC 22:00 (전날) ──────────────
+  schedule:
+    - cron: "0 22 * * *"   # UTC 22:00 = KST 07:00
+
+  # ── 수동 실행 (테스트용) ────────────────────────────────
+  workflow_dispatch:
+
+jobs:
+  generate-and-send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 📦 소스 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 🐍 Python 3.11 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: 📚 의존성 패키지 설치
+        run: pip install -r requirements.txt
+
+      - name: 🚀 블로그 원고 생성 및 이메일 발송
+        env:
+          # ✅ 모두 무료 서비스의 API 키
+          GEMINI_API_KEY:  ${{ secrets.GEMINI_API_KEY }}   # Google AI Studio (무료)
+          PEXELS_API_KEY:  ${{ secrets.PEXELS_API_KEY }}   # Pexels (무료)
+          GMAIL_USER:      ${{ secrets.GMAIL_USER }}        # Gmail (무료)
+          GMAIL_APP_PASS:  ${{ secrets.GMAIL_APP_PASS }}    # Gmail 앱 비밀번호 (무료)
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}   # 수신자 이메일
+        run: python generate_post.py
+
+      - name: 💾 생성된 원고 아티팩트 저장 (30일 보관)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blog-post-${{ github.run_number }}
+          path: output/
+          retention-days: 30
+
+      - name: ⚠️ 실패 시 이메일 알림
+        if: failure()
+        env:
+          GMAIL_USER:      ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASS:  ${{ secrets.GMAIL_APP_PASS }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+        run: |
+          python -c "
+          from send_email import send_blog_email
+          import os
+          send_blog_email(
+              recipient=os.environ['RECIPIENT_EMAIL'],
+              subject='❌ [블로그 자동화] 오늘 원고 생성 실패',
+              html_body='<p>오늘 블로그 원고 자동 생성 중 오류가 발생했습니다.<br>GitHub Actions 로그를 확인해주세요.</p>'
+          )
+          "
