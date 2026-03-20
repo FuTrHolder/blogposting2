@@ -1,37 +1,24 @@
 """
 대한민국 정부 지원사업 블로그 포스팅 자동 생성기 (완전 무료 버전)
 
-비용 구조:
-  - AI 글 생성 : Google Gemini 2.0 Flash API  → 완전 무료 (1일 1,500회 한도)
-  - 이미지 검색 : Pexels API                  → 완전 무료 (월 20,000회 한도)
-  - 스케줄링   : GitHub Actions               → 완전 무료
-  - 이메일 발송 : Gmail SMTP (앱 비밀번호)     → 완전 무료
-
-[2.5-flash → 2.0-flash 변경 이유]
-  gemini-2.5-flash 는 내부 "thinking" 토큰을 maxOutputTokens 에서
-  함께 소모하므로 1024~2048 토큰 설정 시 실제 출력이 잘리는 문제가 있음.
-  gemini-2.0-flash 는 thinking 오버헤드가 없어 안정적으로 동작.
+AI    : Google Gemini 2.0 Flash  (무료, 1일 1,500회)
+이미지 : Pexels API               (무료, 월 20,000회)
+스케줄 : GitHub Actions           (무료)
+메일  : Gmail SMTP                (무료)
 """
 
-import os
-import json
-import re
-import requests
-import feedparser
+import os, json, re, random, requests, feedparser
 from datetime import datetime
 
-# ── 환경변수 ──────────────────────────────────────────────
 GEMINI_API_KEY  = os.environ["GEMINI_API_KEY"]
 PEXELS_API_KEY  = os.environ["PEXELS_API_KEY"]
 RECIPIENT_EMAIL = os.environ["RECIPIENT_EMAIL"]
 
-# Gemini 2.0 Flash — thinking 오버헤드 없이 안정적으로 동작
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "gemini-2.0-flash:generateContent"
 )
 
-# ── 공공 RSS 피드 목록 ────────────────────────────────────
 RSS_FEEDS = [
     "https://www.mss.go.kr/site/smba/ex/bbs/RssReader.do?bbsId=BBSMSTR_000000000179",
     "https://www.moel.go.kr/rss/pressRelease.rss",
@@ -53,6 +40,7 @@ FALLBACK_TOPICS = [
     "1인 창업자를 위한 정부 지원 총정리",
 ]
 
+# ── RSS 수집 ──────────────────────────────────────────────
 
 def fetch_rss_topics(max_items=5):
     items = []
@@ -63,7 +51,7 @@ def fetch_rss_topics(max_items=5):
                 title   = entry.get("title", "").strip()
                 summary = entry.get("summary", entry.get("description", "")).strip()
                 link    = entry.get("link", "")
-                kws = ["지원", "사업", "신청", "모집", "공모", "보조", "융자", "창업", "취업"]
+                kws = ["지원","사업","신청","모집","공모","보조","융자","창업","취업"]
                 if any(kw in title for kw in kws):
                     summary_clean = re.sub(r"<[^>]+>", "", summary)[:300]
                     items.append({
@@ -73,25 +61,20 @@ def fetch_rss_topics(max_items=5):
                 if len(items) >= max_items:
                     break
         except Exception as e:
-            print(f"RSS 수집 오류 ({url}): {e}")
+            print(f"RSS 수집 오류: {e}")
         if len(items) >= max_items:
             break
 
     if not items:
         print("RSS 수집 실패 → 폴백 주제 사용")
-        import random
         topic = random.choice(FALLBACK_TOPICS)
         items = [{"title": topic, "summary": "", "link": "", "source": "자체 기획"}]
 
     return items[:max_items]
 
+# ── Gemini 호출 ───────────────────────────────────────────
 
 def _call_gemini(prompt, max_tokens=8192, temperature=0.7):
-    """
-    Gemini 2.0 Flash API 호출.
-    텍스트가 있으면 반환, 없으면 ValueError.
-    MAX_TOKENS 로 잘려도 텍스트가 있으면 그대로 사용.
-    """
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -111,45 +94,55 @@ def _call_gemini(prompt, max_tokens=8192, temperature=0.7):
 
     candidates = data.get("candidates", [])
     if not candidates:
-        feedback = data.get("promptFeedback", {})
-        raise ValueError(f"Gemini 응답 candidates 없음: {feedback}")
+        raise ValueError("Gemini 응답 없음: " + str(data.get("promptFeedback", {})))
 
     finish_reason = candidates[0].get("finishReason", "STOP")
     parts = candidates[0].get("content", {}).get("parts", [])
 
     if not parts or not parts[0].get("text", "").strip():
-        raise ValueError(f"Gemini 응답 텍스트 없음 (finishReason={finish_reason})")
+        raise ValueError("Gemini 텍스트 없음 (finishReason=" + finish_reason + ")")
 
     text = parts[0]["text"].strip()
     if finish_reason == "MAX_TOKENS":
-        print(f"   ⚠️  MAX_TOKENS 종료 — 출력된 텍스트 사용 ({len(text)}자)")
+        print("   ⚠️  MAX_TOKENS 종료 — 출력 텍스트 그대로 사용 (" + str(len(text)) + "자)")
 
     return text
 
+# ── 블로그 생성 (2단계) ───────────────────────────────────
 
 def generate_blog_post_gemini(topic_items):
-    """
-    2단계 생성:
-    1단계 — 메타데이터 JSON (제목·키워드·아웃라인), max_tokens=2048
-    2단계 — 마크다운 본문만,                          max_tokens=8192
-    """
     today = datetime.now().strftime("%Y년 %m월 %d일")
-    topics_text = "\n".join(
-        [f"- [{i['source']}] {i['title']}\n  {i['summary']}" for i in topic_items]
+
+    topics_lines = []
+    for i in topic_items:
+        topics_lines.append("- [" + i["source"] + "] " + i["title"])
+        if i["summary"]:
+            topics_lines.append("  " + i["summary"])
+    topics_text = "\n".join(topics_lines)
+
+    # JSON 템플릿 — f-string 밖에서 일반 문자열로 정의
+    json_template = (
+        '{"title":"매력적인 제목",'
+        '"description":"요약 80자 이내",'
+        '"keywords":["키워드1","키워드2","키워드3","키워드4","키워드5"],'
+        '"pexels_query":"english 2words",'
+        '"outline":["소제목1","소제목2","소제목3","소제목4","소제목5"]}'
     )
 
     # ── 1단계: 메타데이터 JSON ───────────────────────────
-    meta_prompt = (
-        f"당신은 대한민국 정부 지원사업 전문 블로그 기획자입니다.\n"
-        f"오늘({today}) 기준 아래 최신 정보를 참고해 포스팅 기획안을 JSON으로 만들어주세요.\n\n"
-        f"참고 정보:\n{topics_text}\n\n"
-        f"출력 규칙:\n"
-        f"- 반드시 아래 JSON 형식만 출력 (앞뒤 설명, 코드펜스 절대 금지)\n"
-        f"- 모든 값은 한국어 (pexels_query만 영어)\n\n"
-        f'{{\"title\":\"매력적인 제목\",\"description\":\"요약 80자 이내\","
-        f'\"keywords\":[\"키워드1\",\"키워드2\",\"키워드3\",\"키워드4\",\"키워드5\"],'
-        f'\"pexels_query\":\"영문 2단어\",\"outline\":[\"소제목1\",\"소제목2\",\"소제목3\",\"소제목4\",\"소제목5\"]}}'
-    )
+    meta_prompt = "\n".join([
+        "당신은 대한민국 정부 지원사업 전문 블로그 기획자입니다.",
+        "오늘(" + today + ") 기준 아래 최신 정보를 참고해 포스팅 기획안을 JSON으로 만들어주세요.",
+        "",
+        "참고 정보:",
+        topics_text,
+        "",
+        "출력 규칙:",
+        "- 반드시 아래 JSON 형식만 출력 (앞뒤 설명, 코드펜스 절대 금지)",
+        "- 모든 값은 한국어 (pexels_query만 영어 2단어)",
+        "",
+        json_template,
+    ])
 
     meta = None
     for attempt in range(1, 4):
@@ -157,35 +150,41 @@ def generate_blog_post_gemini(topic_items):
             raw = _call_gemini(meta_prompt, max_tokens=2048, temperature=0.7)
             raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
             raw = re.sub(r"\s*```\s*$",       "", raw, flags=re.MULTILINE)
-            # { ... } 블록만 추출
             m = re.search(r"\{.*\}", raw, re.DOTALL)
             if not m:
                 raise ValueError("JSON 블록 없음")
             meta = json.loads(m.group())
-            print(f"   → [1단계] 메타데이터 생성 완료 (시도 {attempt}회)")
+            print("   → [1단계] 메타데이터 생성 완료 (시도 " + str(attempt) + "회)")
             break
         except (json.JSONDecodeError, ValueError) as e:
-            print(f"   ⚠️  [1단계] 시도 {attempt}/3 실패: {e}")
+            print("   ⚠️  [1단계] 시도 " + str(attempt) + "/3 실패: " + str(e))
             if attempt == 3:
                 raise RuntimeError("메타데이터 생성 3회 모두 실패") from e
 
     # ── 2단계: 마크다운 본문 ─────────────────────────────
-    outline_text = "\n".join(
-        [f"{i+1}. {h}" for i, h in enumerate(meta.get("outline", []))]
-    )
-    content_prompt = (
-        f"당신은 대한민국 정부 지원사업 전문 블로그 작가입니다.\n\n"
-        f"제목: {meta['title']}\n\n"
-        f"아래 소제목 순서대로 블로그 본문을 작성해주세요:\n{outline_text}\n\n"
-        f"작성 원칙:\n"
-        f"- 부드럽고 자연스러운 한국어 (공문체 금지)\n"
-        f"- 마크다운 형식 (## 소제목, **볼드**, - 목록 적극 활용)\n"
-        f"- 전체 2,800자 ~ 3,200자 (공백 포함)\n"
-        f"- 독자가 직접 신청할 수 있도록 구체적인 정보 포함\n"
-        f"- 마지막 섹션 제목은 반드시 \"📌 신청 TIP\" 또는 \"💡 이것만 기억하세요\"\n"
-        f"- 코드펜스나 JSON 없이 마크다운 텍스트만 출력\n\n"
-        f"지금 바로 본문만 작성하세요:"
-    )
+    outline_lines = []
+    for idx, h in enumerate(meta.get("outline", [])):
+        outline_lines.append(str(idx + 1) + ". " + h)
+    outline_text = "\n".join(outline_lines)
+
+    content_prompt = "\n".join([
+        "당신은 대한민국 정부 지원사업 전문 블로그 작가입니다.",
+        "",
+        "제목: " + meta["title"],
+        "",
+        "아래 소제목 순서대로 블로그 본문을 작성해주세요:",
+        outline_text,
+        "",
+        "작성 원칙:",
+        "- 부드럽고 자연스러운 한국어 (공문체 금지)",
+        "- 마크다운 형식 (## 소제목, **볼드**, - 목록 적극 활용)",
+        "- 전체 2,800자 ~ 3,200자 (공백 포함)",
+        "- 독자가 직접 신청할 수 있도록 구체적인 정보 포함",
+        "- 마지막 섹션 제목은 반드시 '📌 신청 TIP' 또는 '💡 이것만 기억하세요'",
+        "- 코드펜스나 JSON 없이 마크다운 텍스트만 출력",
+        "",
+        "지금 바로 본문만 작성하세요:",
+    ])
 
     content = None
     for attempt in range(1, 4):
@@ -195,12 +194,12 @@ def generate_blog_post_gemini(topic_items):
             raw = re.sub(r"\s*```\s*$",           "", raw, flags=re.MULTILINE)
             raw = raw.strip()
             if len(raw) < 800:
-                raise ValueError(f"본문 너무 짧음 ({len(raw)}자)")
+                raise ValueError("본문 너무 짧음 (" + str(len(raw)) + "자)")
             content = raw
-            print(f"   → [2단계] 본문 생성 완료 ({len(content):,}자, 시도 {attempt}회)")
+            print("   → [2단계] 본문 생성 완료 (" + str(len(content)) + "자, 시도 " + str(attempt) + "회)")
             break
         except ValueError as e:
-            print(f"   ⚠️  [2단계] 시도 {attempt}/3 실패: {e}")
+            print("   ⚠️  [2단계] 시도 " + str(attempt) + "/3 실패: " + str(e))
             if attempt == 3:
                 raise RuntimeError("본문 생성 3회 모두 실패") from e
 
@@ -212,6 +211,7 @@ def generate_blog_post_gemini(topic_items):
         "content":      content,
     }
 
+# ── Pexels 이미지 ─────────────────────────────────────────
 
 def fetch_pexels_image(query):
     try:
@@ -233,9 +233,10 @@ def fetch_pexels_image(query):
                 "pexels_url":   photo["url"],
             }
     except Exception as e:
-        print(f"Pexels 이미지 검색 오류: {e}")
+        print("Pexels 오류: " + str(e))
     return None
 
+# ── 이메일 HTML ───────────────────────────────────────────
 
 def build_email_html(post, image):
     today_str = datetime.now().strftime("%Y.%m.%d")
@@ -245,101 +246,109 @@ def build_email_html(post, image):
     c = re.sub(r"^### (.+)$",    r"<h3>\1</h3>",         c, flags=re.MULTILINE)
     c = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", c)
     c = re.sub(r"^- (.+)$",      r"<li>\1</li>",         c, flags=re.MULTILINE)
-    c = re.sub(r"\n\n",          r"</p><p>",             c)
-    c = f"<p>{c}</p>"
+    c = re.sub(r"\n\n",          "</p><p>",               c)
+    c = "<p>" + c + "</p>"
 
     image_block = ""
     if image:
         image_block = (
-            f'<div style="margin:24px 0;">'
-            f'<img src="{image["url"]}" alt="{image["alt"]}" '
-            f'style="width:100%;border-radius:8px;max-height:420px;object-fit:cover;">'
-            f'<p style="font-size:12px;color:#999;margin-top:6px;text-align:right;">'
-            f'Photo by <a href="{image["pexels_url"]}" style="color:#999;">{image["photographer"]}</a>'
-            f' on <a href="https://www.pexels.com" style="color:#999;">Pexels</a></p></div>'
+            '<div style="margin:24px 0;">'
+            '<img src="' + image["url"] + '" alt="' + image["alt"] + '" '
+            'style="width:100%;border-radius:8px;max-height:420px;object-fit:cover;">'
+            '<p style="font-size:12px;color:#999;margin-top:6px;text-align:right;">'
+            'Photo by <a href="' + image["pexels_url"] + '" style="color:#999;">' + image["photographer"] + '</a>'
+            ' on <a href="https://www.pexels.com" style="color:#999;">Pexels</a></p></div>'
         )
 
     kw_html = " ".join(
-        f'<span style="background:#e8f4ff;color:#1a6bbf;padding:3px 10px;border-radius:20px;font-size:13px;">#{kw}</span>'
+        '<span style="background:#e8f4ff;color:#1a6bbf;padding:3px 10px;'
+        'border-radius:20px;font-size:13px;">#' + kw + '</span>'
         for kw in post.get("keywords", [])
     )
 
-    return f"""<!DOCTYPE html>
-<html lang="ko"><head><meta charset="UTF-8"></head>
-<body style="margin:0;padding:0;background:#f5f7fa;font-family:'Apple SD Gothic Neo',sans-serif;">
-<div style="max-width:680px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
-  <div style="background:linear-gradient(135deg,#1a6bbf,#0d4a8a);padding:32px 40px;">
-    <p style="color:rgba(255,255,255,.7);font-size:13px;margin:0 0 8px;">📅 {today_str} 발행 예정 원고 | ✨ Gemini 2.0 Flash (무료)</p>
-    <h1 style="color:#fff;font-size:24px;line-height:1.4;margin:0 0 12px;">{post['title']}</h1>
-    <p style="color:rgba(255,255,255,.85);font-size:14px;margin:0;">{post['description']}</p>
-  </div>
-  {image_block}
-  <div style="padding:16px 40px 8px;">{kw_html}</div>
-  <div style="padding:8px 40px 40px;color:#333;font-size:15px;line-height:1.8;">{c}</div>
-  <div style="background:#f8f9fc;border-top:1px solid #eee;padding:20px 40px;font-size:13px;color:#777;">
-    ✉️ 마크다운(.md) 원본 파일이 첨부되어 있습니다.<br>
-    <span style="color:#aaa;font-size:11px;">🤖 Gemini 2.0 Flash | 🖼️ Pexels | ⚙️ GitHub Actions</span>
-  </div>
-</div></body></html>"""
+    return (
+        '<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"></head>'
+        '<body style="margin:0;padding:0;background:#f5f7fa;font-family:sans-serif;">'
+        '<div style="max-width:680px;margin:0 auto;background:#fff;border-radius:12px;'
+        'overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">'
+        '<div style="background:linear-gradient(135deg,#1a6bbf,#0d4a8a);padding:32px 40px;">'
+        '<p style="color:rgba(255,255,255,.7);font-size:13px;margin:0 0 8px;">'
+        '📅 ' + today_str + ' 발행 예정 원고 | ✨ Gemini 2.0 Flash (무료)</p>'
+        '<h1 style="color:#fff;font-size:24px;line-height:1.4;margin:0 0 12px;">' + post["title"] + '</h1>'
+        '<p style="color:rgba(255,255,255,.85);font-size:14px;margin:0;">' + post["description"] + '</p>'
+        '</div>'
+        + image_block +
+        '<div style="padding:16px 40px 8px;">' + kw_html + '</div>'
+        '<div style="padding:8px 40px 40px;color:#333;font-size:15px;line-height:1.8;">' + c + '</div>'
+        '<div style="background:#f8f9fc;border-top:1px solid #eee;padding:20px 40px;font-size:13px;color:#777;">'
+        '✉️ 마크다운(.md) 파일이 첨부되어 있습니다.<br>'
+        '<span style="color:#aaa;font-size:11px;">🤖 Gemini 2.0 Flash | 🖼️ Pexels | ⚙️ GitHub Actions</span>'
+        '</div></div></body></html>'
+    )
 
+# ── 마크다운 저장 ─────────────────────────────────────────
 
 def save_markdown(post, image, output_dir="output"):
     os.makedirs(output_dir, exist_ok=True)
-    filename = f"{output_dir}/post_{datetime.now().strftime('%Y%m%d')}.md"
+    filename = output_dir + "/post_" + datetime.now().strftime("%Y%m%d") + ".md"
     image_md = ""
     if image:
         image_md = (
-            f"![{image['alt']}]({image['url']})\n"
-            f"*Photo by [{image['photographer']}]({image['pexels_url']}) on [Pexels](https://www.pexels.com)*\n\n"
+            "![" + image["alt"] + "](" + image["url"] + ")\n"
+            "*Photo by [" + image["photographer"] + "](" + image["pexels_url"] + ")"
+            " on [Pexels](https://www.pexels.com)*\n\n"
         )
-    kw_line = ", ".join([f"`#{kw}`" for kw in post.get("keywords", [])])
+    kw_line = ", ".join("`#" + kw + "`" for kw in post.get("keywords", []))
     with open(filename, "w", encoding="utf-8") as f:
-        f.write(f"# {post['title']}\n\n> {post['description']}\n\n**태그:** {kw_line}\n\n---\n\n")
+        f.write("# " + post["title"] + "\n\n")
+        f.write("> " + post["description"] + "\n\n")
+        f.write("**태그:** " + kw_line + "\n\n---\n\n")
         f.write(image_md)
         f.write(post["content"])
-        f.write(f"\n\n---\n*발행일: {datetime.now().strftime('%Y년 %m월 %d일')}*\n")
+        f.write("\n\n---\n*발행일: " + datetime.now().strftime("%Y년 %m월 %d일") + "*\n")
     return filename
 
+# ── 메인 ─────────────────────────────────────────────────
 
 def main():
     print("=" * 55)
-    print(f"🚀 블로그 원고 생성 시작: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print("   💸 사용 비용: ₩0 (완전 무료)")
+    print("🚀 블로그 원고 생성 시작: " + datetime.now().strftime("%Y-%m-%d %H:%M"))
+    print("   💸 사용 비용: 0원 (완전 무료)")
     print("=" * 55)
 
     print("\n📡 [1/4] RSS 피드 수집 중...")
     topics = fetch_rss_topics(max_items=5)
-    print(f"   → {len(topics)}개 주제 수집 완료")
+    print("   → " + str(len(topics)) + "개 주제 수집 완료")
     for t in topics:
-        print(f"   • {t['title'][:50]}...")
+        print("   • " + t["title"][:50] + "...")
 
     print("\n✍️  [2/4] Gemini 2.0 Flash로 블로그 포스팅 생성 중...")
     post = generate_blog_post_gemini(topics)
-    print(f"   → 제목: {post['title']}")
-    print(f"   → 글자 수: {len(post['content']):,}자")
-    print(f"   → 키워드: {', '.join(post.get('keywords', []))}")
+    print("   → 제목: " + post["title"])
+    print("   → 글자 수: " + str(len(post["content"])) + "자")
+    print("   → 키워드: " + ", ".join(post.get("keywords", [])))
 
     print("\n🖼️  [3/4] Pexels 이미지 검색 중...")
     image = fetch_pexels_image(post.get("pexels_query", "korea government office"))
     if image:
-        print(f"   → {image['alt']} (by {image['photographer']})")
+        print("   → " + image["alt"] + " (by " + image["photographer"] + ")")
     else:
         print("   → 이미지 없음. 텍스트만 발송합니다.")
 
     print("\n💾 [4/4] 마크다운 파일 저장 중...")
     md_file = save_markdown(post, image)
-    print(f"   → 저장 완료: {md_file}")
+    print("   → 저장 완료: " + md_file)
 
     print("\n📧 이메일 발송 중...")
     from send_email import send_blog_email
     send_blog_email(
         recipient=RECIPIENT_EMAIL,
-        subject=f"[블로그 원고] {post['title']} ({datetime.now().strftime('%Y.%m.%d')})",
+        subject="[블로그 원고] " + post["title"] + " (" + datetime.now().strftime("%Y.%m.%d") + ")",
         html_body=build_email_html(post, image),
         attachment_path=md_file,
     )
-    print(f"   → {RECIPIENT_EMAIL} 으로 발송 완료!")
-    print("\n✅ 전체 파이프라인 완료! (총 비용: ₩0)")
+    print("   → " + RECIPIENT_EMAIL + " 으로 발송 완료!")
+    print("\n✅ 전체 파이프라인 완료! (총 비용: 0원)")
 
 
 if __name__ == "__main__":
