@@ -1,7 +1,12 @@
 name: 📝 블로그 원고 자동 생성 및 발송 (완전 무료)
 
 on:
- workflow_dispatch:
+  # ── cron-job.org 에서 HTTP POST로 트리거 ──────────────
+  repository_dispatch:
+    types: [blog-trigger]
+
+  # ── 수동 실행 (테스트용) ────────────────────────────────
+  workflow_dispatch:
 
 jobs:
   generate-and-send:
@@ -23,12 +28,11 @@ jobs:
 
       - name: 🚀 블로그 원고 생성 및 이메일 발송
         env:
-          # ✅ 모두 무료 서비스의 API 키
-          GEMINI_API_KEY:  ${{ secrets.GEMINI_API_KEY }}   # Google AI Studio (무료)
-          PEXELS_API_KEY:  ${{ secrets.PEXELS_API_KEY }}   # Pexels (무료)
-          GMAIL_USER:      ${{ secrets.GMAIL_USER }}        # Gmail (무료)
-          GMAIL_APP_PASS:  ${{ secrets.GMAIL_APP_PASS }}    # Gmail 앱 비밀번호 (무료)
-          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}   # 수신자 이메일
+          GEMINI_API_KEY:  ${{ secrets.GEMINI_API_KEY }}
+          PEXELS_API_KEY:  ${{ secrets.PEXELS_API_KEY }}
+          GMAIL_USER:      ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASS:  ${{ secrets.GMAIL_APP_PASS }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
         run: python generate_post.py
 
       - name: 💾 생성된 원고 아티팩트 저장 (30일 보관)
