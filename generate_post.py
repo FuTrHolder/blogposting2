@@ -91,67 +91,127 @@ def fetch_rss_topics(max_items: int = 5) -> list[dict]:
     return items[:max_items]
 
 
-def generate_blog_post_gemini(topic_items: list[dict]) -> dict:
-    """
-    Google Gemini 2.5 Flash API로 블로그 포스팅을 생성합니다.
-    완전 무료 (1일 250회 한도 / 개인 프로젝트에 충분)
-    """
-    today = datetime.now().strftime("%Y년 %m월 %d일")
-    topics_text = "\n".join(
-        [f"- [{i['source']}] {i['title']}\n  {i['summary']}" for i in topic_items]
-    )
-
-    prompt = f"""당신은 대한민국 정부 지원사업 전문 블로그 작가입니다.
-독자는 창업자, 소상공인, 취업 준비생, 중소기업 대표 등 실질적인 정보를 필요로 하는 사람들입니다.
-
-글쓰기 원칙:
-- 부드럽고 자연스러운 한국어 어조 (딱딱한 공문체 금지)
-- 마크다운 형식 (## 소제목, **볼드**, 목록 등 활용)
-- 3,000자 내외 (공백 포함)
-- 독자가 실제로 신청·활용할 수 있도록 핵심 정보 중심
-- 마지막에 반드시 "📌 신청 TIP" 또는 "💡 이것만 기억하세요" 섹션 포함
-- SEO를 고려한 자연스러운 키워드 배치
-
-오늘({today}) 기준 최신 정부 지원사업 정보를 바탕으로 블로그 포스팅을 작성해주세요.
-
-## 참고할 최신 정보
-{topics_text}
-
-위 정보 중 가장 독자에게 유익하고 시의성 있는 주제를 선택하거나, 연관 주제들을 묶어서 하나의 완성도 높은 포스팅을 작성해주세요.
-
-응답은 반드시 아래 JSON 형식으로만 해주세요 (마크다운 코드펜스 없이):
-{{
-  "title": "블로그 포스팅 제목",
-  "description": "포스팅 요약 (100자 내외, 이메일 제목 미리보기용)",
-  "keywords": ["키워드1", "키워드2", "키워드3"],
-  "pexels_query": "Pexels 이미지 검색 영문 키워드 (2-3단어, 예: korea business office)",
-  "content": "마크다운 전체 본문 내용"
-}}"""
-
+def _call_gemini(prompt: str, max_tokens: int = 8192, temperature: float = 0.7) -> str:
+    """Gemini API 단일 호출 헬퍼. 응답 텍스트를 반환합니다."""
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
-            "temperature":     0.7,
-            "maxOutputTokens": 4096,
+            "temperature":     temperature,
+            "maxOutputTokens": max_tokens,
         },
     }
-
     resp = requests.post(
         GEMINI_URL,
         params={"key": GEMINI_API_KEY},
         headers={"Content-Type": "application/json"},
         json=payload,
-        timeout=60,
+        timeout=120,
     )
     resp.raise_for_status()
     data = resp.json()
 
-    raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    # JSON 코드펜스 제거
-    raw = re.sub(r"^```json\s*", "", raw)
-    raw = re.sub(r"\s*```$",     "", raw)
+    # finishReason 확인 — MAX_TOKENS 이면 잘린 것
+    finish_reason = (
+        data.get("candidates", [{}])[0]
+            .get("finishReason", "STOP")
+    )
+    if finish_reason == "MAX_TOKENS":
+        raise ValueError(f"Gemini 응답이 토큰 한도로 잘렸습니다 (maxOutputTokens={max_tokens})")
 
-    return json.loads(raw)
+    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+
+def generate_blog_post_gemini(topic_items: list[dict]) -> dict:
+    """
+    Google Gemini 2.5 Flash API로 블로그 포스팅을 2단계로 생성합니다.
+
+    [개선 사항]
+    - 2단계 분리: ① 메타데이터(JSON) → ② 본문(순수 마크다운)
+      → JSON 안에 긴 마크다운을 넣지 않아 JSONDecodeError 원천 차단
+    - maxOutputTokens 8192로 증가
+    - 각 단계 최대 3회 자동 재시도
+    완전 무료 (1일 250회 한도 / 2단계이므로 하루 2회 사용)
+    """
+    today       = datetime.now().strftime("%Y년 %m월 %d일")
+    topics_text = "\n".join(
+        [f"- [{i['source']}] {i['title']}\n  {i['summary']}" for i in topic_items]
+    )
+
+    # ── 1단계: 메타데이터만 JSON으로 요청 ──────────────────
+    meta_prompt = f"""당신은 대한민국 정부 지원사업 전문 블로그 작가입니다.
+오늘({today}) 기준 아래 최신 정보를 참고해 포스팅 기획안을 만들어주세요.
+
+## 참고 정보
+{topics_text}
+
+응답은 반드시 아래 JSON만 출력하세요 (코드펜스·설명 없이):
+{{
+  "title": "블로그 포스팅 제목 (클릭을 유도하는 매력적인 제목)",
+  "description": "포스팅 요약 100자 내외",
+  "keywords": ["키워드1", "키워드2", "키워드3", "키워드4", "키워드5"],
+  "pexels_query": "이미지 검색 영문 키워드 2~3단어 (예: korea small business support)",
+  "outline": ["소제목1", "소제목2", "소제목3", "소제목4", "소제목5"]
+}}"""
+
+    meta = None
+    for attempt in range(1, 4):
+        try:
+            raw = _call_gemini(meta_prompt, max_tokens=1024, temperature=0.7)
+            raw = re.sub(r"^```json\s*", "", raw)
+            raw = re.sub(r"\s*```$",     "", raw)
+            meta = json.loads(raw)
+            print(f"   → [1단계] 메타데이터 생성 완료 (시도 {attempt}회)")
+            break
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            print(f"   ⚠️  [1단계] 시도 {attempt}/3 실패: {e}")
+            if attempt == 3:
+                raise RuntimeError("메타데이터 생성 3회 모두 실패") from e
+
+    # ── 2단계: 본문만 순수 마크다운으로 요청 ──────────────
+    outline_text = "\n".join([f"{i+1}. {h}" for i, h in enumerate(meta.get("outline", []))])
+
+    content_prompt = f"""당신은 대한민국 정부 지원사업 전문 블로그 작가입니다.
+
+아래 조건에 맞게 블로그 본문을 작성해주세요.
+
+제목: {meta['title']}
+소제목 구성:
+{outline_text}
+
+글쓰기 원칙:
+- 부드럽고 자연스러운 한국어 어조 (딱딱한 공문체 금지)
+- 마크다운 형식 (## 소제목, **볼드**, 목록 적극 활용)
+- 2,800자~3,200자 (공백 포함)
+- 독자가 실제 신청·활용할 수 있도록 핵심 정보 중심
+- 마지막 섹션은 반드시 "📌 신청 TIP" 또는 "💡 이것만 기억하세요"로 마무리
+- JSON이나 코드펜스 없이 마크다운 본문만 출력
+
+지금 바로 본문을 작성해주세요:"""
+
+    content = None
+    for attempt in range(1, 4):
+        try:
+            content = _call_gemini(content_prompt, max_tokens=8192, temperature=0.75)
+            # 혹시 코드펜스로 감싸진 경우 제거
+            content = re.sub(r"^```(?:markdown)?\s*", "", content)
+            content = re.sub(r"\s*```$", "", content)
+            char_count = len(content)
+            if char_count < 1000:
+                raise ValueError(f"본문이 너무 짧습니다 ({char_count}자)")
+            print(f"   → [2단계] 본문 생성 완료 ({char_count:,}자, 시도 {attempt}회)")
+            break
+        except (ValueError, KeyError) as e:
+            print(f"   ⚠️  [2단계] 시도 {attempt}/3 실패: {e}")
+            if attempt == 3:
+                raise RuntimeError("본문 생성 3회 모두 실패") from e
+
+    return {
+        "title":        meta["title"],
+        "description":  meta["description"],
+        "keywords":     meta.get("keywords", []),
+        "pexels_query": meta.get("pexels_query", "korea government support"),
+        "content":      content,
+    }
 
 
 def fetch_pexels_image(query: str) -> dict | None:
