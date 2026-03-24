@@ -1,7 +1,7 @@
 """
 대한민국 정부 지원사업 블로그 포스팅 자동 생성기 (완전 무료 버전)
 
-AI    : Google Gemini 1.5 Flash  (무료, 1일 1,500회 / 분 15회)
+AI    : Google Gemini 2.5 Flash-Lite (무료, 1일 1,000회 / 분 15회)
 이미지 : Pexels API               (무료, 월 20,000회)
 스케줄 : GitHub Actions           (무료)
 메일  : Gmail SMTP                (무료)
@@ -16,7 +16,7 @@ RECIPIENT_EMAIL = os.environ["RECIPIENT_EMAIL"]
 
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-1.5-flash:generateContent"
+    "gemini-2.5-flash-lite:generateContent"
 )
 
 RSS_FEEDS = [
@@ -286,7 +286,7 @@ def build_email_html(post, image):
         'overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">'
         '<div style="background:linear-gradient(135deg,#1a6bbf,#0d4a8a);padding:32px 40px;">'
         '<p style="color:rgba(255,255,255,.7);font-size:13px;margin:0 0 8px;">'
-        '📅 ' + today_str + ' 발행 예정 원고 | ✨ Gemini 1.5 Flash (무료)</p>'
+        '📅 ' + today_str + ' 발행 예정 원고 | ✨ Gemini 2.5 Flash-Lite (무료)</p>'
         '<h1 style="color:#fff;font-size:24px;line-height:1.4;margin:0 0 12px;">' + post["title"] + '</h1>'
         '<p style="color:rgba(255,255,255,.85);font-size:14px;margin:0;">' + post["description"] + '</p>'
         '</div>'
@@ -295,7 +295,7 @@ def build_email_html(post, image):
         '<div style="padding:8px 40px 40px;color:#333;font-size:15px;line-height:1.8;">' + c + '</div>'
         '<div style="background:#f8f9fc;border-top:1px solid #eee;padding:20px 40px;font-size:13px;color:#777;">'
         '✉️ 마크다운(.md) 파일이 첨부되어 있습니다.<br>'
-        '<span style="color:#aaa;font-size:11px;">🤖 Gemini 1.5 Flash | 🖼️ Pexels | ⚙️ GitHub Actions</span>'
+        '<span style="color:#aaa;font-size:11px;">🤖 Gemini 2.5 Flash-Lite | 🖼️ Pexels | ⚙️ GitHub Actions</span>'
         '</div></div></body></html>'
     )
 
@@ -335,7 +335,7 @@ def main():
     for t in topics:
         print("   • " + t["title"][:50] + "...")
 
-    print("\n✍️  [2/4] Gemini 1.5 Flash로 블로그 포스팅 생성 중...")
+    print("\n✍️  [2/4] Gemini 2.5 Flash-Lite로 블로그 포스팅 생성 중...")
     post = generate_blog_post_gemini(topics)
     print("   → 제목: " + post["title"])
     print("   → 글자 수: " + str(len(post["content"])) + "자")
