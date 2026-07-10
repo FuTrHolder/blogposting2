@@ -20,7 +20,7 @@ def call_gemini(prompt, max_tokens=8192, temperature=0.7):
             "maxOutputTokens": max_tokens,
         },
     }
-    wait_times = [30, 60, 120]
+    wait_times = [20, 40, 60]
 
     for attempt in range(4):
         try:
@@ -29,14 +29,14 @@ def call_gemini(prompt, max_tokens=8192, temperature=0.7):
                 params={"key": GEMINI_API_KEY},
                 headers={"Content-Type": "application/json"},
                 json=payload,
-                timeout=120,
+                timeout=90,
             )
 
-            # 429 / 503 → 재시도
-            if resp.status_code in (429, 503):
+            # 429 / 503 / 500 → 재시도
+            if resp.status_code in (429, 500, 503):
                 if attempt < len(wait_times):
                     wait = wait_times[attempt]
-                    print("   ⏳ Gemini " + str(resp.status_code) + " — " + str(wait) + "초 대기 후 재시도 ("
+                    print("   ⏳ Gemini HTTP " + str(resp.status_code) + " — " + str(wait) + "초 대기 후 재시도 ("
                           + str(attempt + 1) + "/3)...")
                     time.sleep(wait)
                     continue
