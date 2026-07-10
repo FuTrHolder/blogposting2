@@ -8,7 +8,7 @@ on:
 jobs:
   generate-and-send:
     runs-on: ubuntu-latest
-    timeout-minutes: 20     # 분석 단계가 추가되어 여유있게 설정
+    timeout-minutes: 30     # 재시도 대기 포함 충분한 여유 확보
 
     steps:
       - name: 📦 소스 코드 체크아웃
